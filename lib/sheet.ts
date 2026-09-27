@@ -82,7 +82,10 @@ function toFaqRows(rows: string[][]): FaqRow[] {
  */
 export async function getFaqData(): Promise<string> {
   const sheetUrl = process.env.SHEET_CSV_URL;
-  if (!sheetUrl) return "";
+  if (!sheetUrl) {
+    console.error("[sheet] SHEET_CSV_URL is not set — the bot has no FAQ and will hand off every question");
+    return "";
+  }
 
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) {
     return cache.csv;
@@ -93,7 +96,28 @@ export async function getFaqData(): Promise<string> {
     if (!res.ok) throw new Error(`sheet fetch returned ${res.status}`);
 
     const csv = await res.text();
+
+    // A sheet that isn't "Published to web" as CSV doesn't fail: Google redirects to a sign-in
+    // or HTML page and answers 200, so without this check the model is handed a web page as
+    // its FAQ and hands off every question.
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("text/html") || /^\s*</.test(csv)) {
+      throw new Error(
+        "SHEET_CSV_URL returned HTML, not CSV — publish the sheet via File → Share → Publish to web, choose the FAQ tab and .csv, and use that link"
+      );
+    }
+
     const rows = toFaqRows(parseCsv(csv));
+    if (rows.length === 0) {
+      // Not fatal: the raw CSV still goes to the model, which can read Thai headers. But the
+      // documented schema is question/answer, so say so rather than fail quietly.
+      console.warn(
+        "[sheet] no rows parsed — expected header columns 'question' and 'answer' in the first row; got:",
+        parseCsv(csv)[0]?.join(" | ") ?? "(empty sheet)"
+      );
+    } else {
+      console.log("[sheet] loaded", rows.length, "FAQ rows");
+    }
 
     cache = { rows, csv, fetchedAt: Date.now() };
     return csv;

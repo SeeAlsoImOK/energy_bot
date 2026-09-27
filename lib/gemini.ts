@@ -1,7 +1,14 @@
 import { GoogleGenAI } from "@google/genai";
 
 const MODEL = "gemini-3.5-flash";
-const GEMINI_TIMEOUT_MS = 7_000;
+// Thinking runs before the answer and is slow on a prompt that carries the whole FAQ sheet;
+// 7s cut most replies off mid-thought. LINE accepts a reply well past this, and the webhook
+// route's maxDuration leaves headroom above it.
+const GEMINI_TIMEOUT_MS = 20_000;
+// This model thinks by default and its thought tokens count toward maxOutputTokens. At 1024
+// the thinking alone hit the cap, so replies ended as MAX_TOKENS with no text and fell back to
+// the hand-off message. Answer length is held to 1-3 sentences by the prompt, not by this cap.
+const MAX_OUTPUT_TOKENS = 8192;
 
 export const DEFAULT_REPLY =
   "เรื่องนี้ขอส่งต่อให้เจ้าหน้าที่ช่วยเช็คให้อีกทีนะครับ/ค่ะ เดี๋ยวจะติดต่อกลับไปเร็วๆ นี้";
@@ -63,7 +70,7 @@ export async function askGemini(userMessage: string, faqCsv: string): Promise<Ge
       contents: buildPrompt(userMessage, faqCsv),
       config: {
         temperature: 1.0,
-        maxOutputTokens: 1024,
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
         abortSignal: controller.signal,
       },
     });
@@ -79,18 +86,31 @@ export async function askGemini(userMessage: string, faqCsv: string): Promise<Ge
       response.usageMetadata?.candidatesTokenCount
     );
 
+    // Every path below that returns DEFAULT_REPLY says why, so a bot that keeps handing off
+    // can be diagnosed from the logs instead of looking like it simply has no answer.
     if (finishReason === "MAX_TOKENS") {
+      console.error("[gemini] fallback: hit maxOutputTokens", MAX_OUTPUT_TOKENS, "before finishing");
       return { text: DEFAULT_REPLY, finishReason };
     }
 
     if (finishReason !== "STOP") {
-      console.error("[gemini] non-STOP finishReason:", finishReason);
+      console.error("[gemini] fallback: non-STOP finishReason:", finishReason);
       return { text: DEFAULT_REPLY, finishReason };
     }
 
-    return { text: response.text?.trim() || DEFAULT_REPLY, finishReason };
+    const text = response.text?.trim();
+    if (!text) {
+      console.error("[gemini] fallback: STOP with empty text");
+      return { text: DEFAULT_REPLY, finishReason };
+    }
+    return { text, finishReason };
   } catch (err) {
-    console.error("[gemini]", err);
+    const timedOut = controller.signal.aborted;
+    console.error(
+      "[gemini] fallback:",
+      timedOut ? `timed out after ${GEMINI_TIMEOUT_MS}ms` : "request failed",
+      err
+    );
     return { text: DEFAULT_REPLY, finishReason: undefined };
   } finally {
     clearTimeout(timer);

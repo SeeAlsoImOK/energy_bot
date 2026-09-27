@@ -5,6 +5,9 @@ import { replyText } from "@/lib/line";
 import { getFaqData } from "@/lib/sheet";
 
 export const runtime = "nodejs";
+// Without fluid compute a function defaults to a 10s limit, which would kill the request before
+// Gemini's 20s timeout could fire — and then LINE gets no reply at all, not even the hand-off.
+export const maxDuration = 30;
 
 async function handleEvent(event: WebhookEvent): Promise<void> {
   if (event.type !== "message" || event.message.type !== "text") return;
